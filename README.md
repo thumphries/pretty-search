@@ -9,3 +9,5 @@ What happens when we instead encode all possible choices in our printer,
 then apply heuristics to guide the search?
 
 Current answer: ┐(‘～` )┌
+
+May eventually circle back into bidirectional parsing/printing.
