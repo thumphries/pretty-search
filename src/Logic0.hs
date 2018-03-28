@@ -115,6 +115,8 @@ chooseByDepth depth ordering =
       [] ->
         empty
       xs ->
+        -- Hmm, this may ruin backtracking?
+        -- Try: asum (fmap (sortBy ordering xs))
         return $ L.maximumBy ordering xs
 
 chooseOnDepth :: (Monad m, Ord b) => Depth -> (a -> b) -> Heuristic m a
