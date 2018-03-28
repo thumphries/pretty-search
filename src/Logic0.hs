@@ -1,4 +1,5 @@
 {- | Just messing with LogicT, no cursor or nesting -}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Logic0 where
@@ -14,6 +15,7 @@ import           Data.Foldable (maximum)
 import           Data.Function (on)
 import           Data.Functor.Identity (Identity (..))
 import qualified Data.List as L
+import           Data.List.NonEmpty (NonEmpty (..))
 import           Data.Ord (Down (..))
 import           Data.Semigroup (Semigroup (..))
 import           Data.String (IsString)
@@ -21,30 +23,51 @@ import           Data.Text (Text)
 import qualified Data.Text as T
 
 
-newtype PrettyT m a = PrettyT {
-    unPrettyT :: LogicT m a
+{--
+
+TODO loose plans
+
+create a Doc tracking line/col/indent level
+(independent of underlying text type)
+
+ReaderT of cursor, heuristics, guards
+
+express Ribbon as an heuristic and a guard (soft max/hard max)
+
+Apply heuristics and guards... somewhere.
+maybe on each bind, or in the Alternative instance, or...
+(this is hard and will determine the effectiveness)
+
+top level: Guards and Heuristics are late-bound
+
+extend with annotations
+
+--}
+
+newtype SearchT m a = SearchT {
+    unSearchT :: LogicT m a
   } deriving (Functor, Applicative, Alternative, Monad, MonadPlus, MonadTrans)
 
-instance (Applicative f, Semigroup a) => Semigroup (PrettyT f a) where
+instance (Applicative f, Semigroup a) => Semigroup (SearchT f a) where
   (<>) = liftA2 (<>)
 
-instance (Applicative f, Monoid a) => Monoid (PrettyT f a) where
+instance (Applicative f, Monoid a) => Monoid (SearchT f a) where
   mappend = liftA2 mappend
   mempty = pure mempty
 
-type Pretty = PrettyT Identity
+type Search = SearchT Identity
 
-runPretty :: Pretty doc -> doc
-runPretty =
-  runIdentity . runPrettyT
+runSearch :: Search doc -> doc
+runSearch =
+  runIdentity . runSearchT
 
-runPrettyT :: Monad m => PrettyT m doc -> m doc
-runPrettyT =
-  LogicT.observeT . unPrettyT
+runSearchT :: Monad m => SearchT m doc -> m doc
+runSearchT =
+  LogicT.observeT . unSearchT
 
-permuteT :: Monad m => PrettyT m doc -> m [doc]
+permuteT :: Monad m => SearchT m doc -> m [doc]
 permuteT =
-  LogicT.observeAllT . unPrettyT
+  LogicT.observeAllT . unSearchT
 
 -- | Search depth.
 newtype Depth = Depth {
@@ -59,20 +82,34 @@ defaultDepth =
 
 -- | Things that guide the search, without affecting its depth.
 newtype Heuristic m a = Heuristic {
-    runHeuristic :: PrettyT m a -> PrettyT m a
+    runHeuristic :: SearchT m a -> SearchT m a
   }
 
-chooseBy :: Monad m => (a -> a -> Ordering) -> PrettyT m a -> PrettyT m a
+choose :: Monad m => (NonEmpty a -> m a) -> Heuristic m a
+choose =
+  chooseDepth defaultDepth
+
+chooseDepth :: Monad m => Depth -> (NonEmpty a -> m a) -> Heuristic m a
+chooseDepth depth f =
+  Heuristic $ \(SearchT p) -> SearchT $ do
+    rs <- lift $ LogicT.observeManyT (unDepth depth) p
+    case rs of
+      [] ->
+        empty
+      (x:xs) ->
+        lift $ f (x :| xs)
+
+chooseBy :: Monad m => (a -> a -> Ordering) -> Heuristic m a
 chooseBy =
   chooseByDepth defaultDepth
 
-chooseOn :: (Monad m, Ord b) => (a -> b) -> PrettyT m a -> PrettyT m a
+chooseOn :: (Monad m, Ord b) => (a -> b) -> Heuristic m a
 chooseOn =
   chooseOnDepth defaultDepth
 
-chooseByDepth :: Monad m => Depth -> (a -> a -> Ordering) -> PrettyT m a -> PrettyT m a
-chooseByDepth depth ordering (PrettyT p) =
-  PrettyT $ do
+chooseByDepth :: Monad m => Depth -> (a -> a -> Ordering) -> Heuristic m a
+chooseByDepth depth ordering =
+  Heuristic $ \(SearchT p) -> SearchT $ do
     rs <- lift $ LogicT.observeManyT (unDepth depth) p
     case rs of
       [] ->
@@ -80,7 +117,7 @@ chooseByDepth depth ordering (PrettyT p) =
       xs ->
         return $ L.maximumBy ordering xs
 
-chooseOnDepth :: (Monad m, Ord b) => Depth -> (a -> b) -> PrettyT m a -> PrettyT m a
+chooseOnDepth :: (Monad m, Ord b) => Depth -> (a -> b) -> Heuristic m a
 chooseOnDepth depth f =
   chooseByDepth depth (compare `on` f)
 
@@ -88,28 +125,36 @@ chooseOnDepth depth f =
 
 -- | Things that restrict the search.
 newtype Guard m a = Guard {
-    runGuard :: PrettyT m a -> PrettyT m a
+    runGuard :: SearchT m a -> SearchT m a
   }
+
+guardOn :: Monad m => (a -> m Bool) -> Guard m a
+guardOn predi =
+  Guard $ \(SearchT p) -> SearchT $ do
+    a <- p
+    b <- lift (predi a)
+    guard b
+    return a
 
 -- -----------------------------------------------------------------------------
 
-string :: (Monad m, IsString s) => s -> PrettyT m s
+string :: (Monad m, IsString s) => s -> SearchT m s
 string =
   pure
 
-chooseTallest :: Monad m => PrettyT m Text -> PrettyT m Text
+chooseTallest :: Monad m => Heuristic m Text
 chooseTallest =
   chooseOn height
 
-chooseShortest :: Monad m => PrettyT m Text -> PrettyT m Text
+chooseShortest :: Monad m => Heuristic m Text
 chooseShortest =
   chooseBy (compare `on` (Down . height))
 
-chooseWidest :: Monad m => PrettyT m Text -> PrettyT m Text
+chooseWidest :: Monad m => Heuristic m Text
 chooseWidest =
   chooseOn maxWidth
 
-chooseNarrowest :: Monad m => PrettyT m Text -> PrettyT m Text
+chooseNarrowest :: Monad m => Heuristic m Text
 chooseNarrowest =
   chooseBy (compare `on` (Down . maxWidth))
 
@@ -123,28 +168,28 @@ height =
 
 -- -----------------------------------------------------------------------------
 
-testPrinter :: Pretty Text
+testPrinter :: Search Text
 testPrinter =
       string "foobarbaz"
   <|> string "foo\nbar\nbaz"
 
-testPrinter2 :: Pretty Text
+testPrinter2 :: Search Text
 testPrinter2 =
-     chooseTallest testPrinter
-  <> chooseWidest testPrinter
+     runHeuristic chooseTallest testPrinter
+  <> runHeuristic chooseWidest testPrinter
 
-tallestTest :: Pretty Text
+tallestTest :: Search Text
 tallestTest =
-  chooseTallest testPrinter
+  runHeuristic chooseTallest testPrinter
 
-shortestTest :: Pretty Text
+shortestTest :: Search Text
 shortestTest =
-  chooseShortest testPrinter
+  runHeuristic chooseShortest testPrinter
 
-widestTest :: Pretty Text
+widestTest :: Search Text
 widestTest =
-  chooseWidest testPrinter
+  runHeuristic chooseWidest testPrinter
 
-narrowestTest :: Pretty Text
+narrowestTest :: Search Text
 narrowestTest =
-  chooseNarrowest testPrinter
+  runHeuristic chooseNarrowest testPrinter
